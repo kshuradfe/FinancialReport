@@ -2,11 +2,13 @@
 中概股财务数据采集 - 混合方案（最佳方案）
 
 策略：
-1. 使用 akshare 自动获取完整的中概股列表
+1. 从 Company_List.xlsx 读取股票列表（包括美股、港股、其他国家）
 2. 使用 yfinance 获取财务数据（更稳定、数据更全）
+3. 新增市值和市盈率指标
 
 优点：
-- 自动获取所有中概股，无需手动维护CSV
+- 直接从本地文件读取股票列表，无需调用API获取
+- 支持多个市场（美股、港股等）
 - 财务数据使用yfinance，更稳定可靠
 """
 
@@ -32,7 +34,10 @@ except ImportError:
 
 # ================= 配置区 =================
 TEST_MODE = True
-TEST_LIMIT = 300  # 测试模式下每个市场的数量
+TEST_LIMIT = 30  # 测试模式下每个市场的数量
+
+# 公司列表文件路径
+COMPANY_LIST_FILE = "Company_List.xlsx"
 
 # 财务数据请求延迟
 REQUEST_DELAY = 0.5
@@ -41,20 +46,11 @@ REQUEST_DELAY = 0.5
 MAX_RETRIES = 3
 
 # ADR及特殊ticker别名映射表（解决ticker不匹配问题）
+# 注意：yfinance 中美股代码通常不需要后缀，直接使用代码即可
+# 只有在特殊情况下（如股票代码改变）才需要映射
 ADR_ALIAS = {
-    'HCM': 'HCM.US',      # 和黄医药
-    'ONC': 'ONC.US',      # 百济神州
-    'AAPG': 'AAPG.US',
-    'ABLV': 'ABLV.US',
-    'SOGP': 'SOGP.US',
-    'AAM': 'AAM.US',
-    'BON': 'BON.US',
-    'CHNR': 'CHNR.US',
-    'AEHL': 'AEHL.US',
-    'EJH': 'EJH.US',
-    'TANH': 'TANH.US',
-    'PLAG': 'PLAG.US',
-    'FAMI': 'FAMI.US',
+    # 如果发现某些股票代码在 yfinance 中查不到，可以在这里添加映射
+    # 例如：'OLD_CODE': 'NEW_CODE'
 }
 
 # 美股中概股列表（用于筛选）
@@ -109,7 +105,66 @@ US_CHINA_STOCKS = [
 # =========================================
 
 
-def get_us_stocks_list():
+def get_stocks_from_excel():
+    """
+    从 Company_List.xlsx 读取股票列表
+    返回按交易所分类的股票DataFrame
+    """
+    print(f"\n正在从 {COMPANY_LIST_FILE} 读取股票列表...")
+    
+    try:
+        df = pd.read_excel(COMPANY_LIST_FILE)
+        print(f"  ✅ 读取成功: {len(df)} 只股票")
+        
+        # 检查必需的列
+        required_columns = ['code', 'exchange']
+        if not all(col in df.columns for col in required_columns):
+            print(f"  ❌ 缺少必需列: {required_columns}")
+            return pd.DataFrame()
+        
+        # 显示交易所分布
+        print("\n  📊 交易所分布:")
+        exchange_counts = df['exchange'].value_counts()
+        for exchange, count in exchange_counts.items():
+            print(f"     {exchange}: {count} 只")
+        
+        # 标准化列名以匹配原有逻辑
+        result = pd.DataFrame()
+        result['股票代码'] = df['code'].astype(str)
+        result['股票简称'] = df['short'] if 'short' in df.columns else (df['name'] if 'name' in df.columns else df['code'])
+        result['企业全称'] = df['name'] if 'name' in df.columns else result['股票简称']
+        result['上市交易所'] = df['exchange']
+        
+        # 根据交易所设置币种
+        def get_currency(exchange):
+            exchange_lower = str(exchange).lower()
+            if 'hk' in exchange_lower or '港' in str(exchange):
+                return 'HKD'
+            elif 'us' in exchange_lower or 'nasdaq' in exchange_lower or 'nyse' in exchange_lower:
+                return 'USD'
+            elif 'sh' in exchange_lower or 'sz' in exchange_lower or '沪' in str(exchange) or '深' in str(exchange):
+                return 'CNY'
+            else:
+                return 'USD'  # 默认
+        
+        result['币种'] = result['上市交易所'].apply(get_currency)
+        
+        # 测试模式截断
+        if TEST_MODE:
+            print(f"\n  [测试模式] 仅使用前 {TEST_LIMIT} 只股票")
+            result = result.head(TEST_LIMIT)
+        
+        return result
+        
+    except FileNotFoundError:
+        print(f"  ❌ 文件未找到: {COMPANY_LIST_FILE}")
+        return pd.DataFrame()
+    except Exception as e:
+        print(f"  ❌ 读取失败: {e}")
+        return pd.DataFrame()
+
+
+def get_us_stocks_list_old():
     """
     自动获取美股中概股列表 (增强版：API失效时使用全量筛选)
     """
@@ -252,9 +307,9 @@ def get_hk_stocks_list():
     return pd.DataFrame()
 
 
-def get_financial_data_hk_akshare(stock_code, stock_name):
+def get_financial_data_hk_akshare(stock_code, stock_name, exchange='HKEX'):
     """
-    使用akshare获取港股财务数据
+    使用akshare获取港股财务数据（备用函数，当前未使用）
     """
     try:
         # 获取港股财务数据（东方财富数据源）
@@ -277,6 +332,7 @@ def get_financial_data_hk_akshare(stock_code, stock_name):
                 record = {
                     '股票代码': stock_code,
                     '股票简称': stock_name,
+                    '交易所': exchange,
                     '币种': 'HKD',
                     '报告期间': report_date,
                     '总资产': balance_df.iloc[idx].get('资产总计', None) if idx < len(balance_df) else None,
@@ -319,45 +375,96 @@ def get_financial_data_hk_akshare(stock_code, stock_name):
         return pd.DataFrame()
 
 
-def get_financial_data_yfinance(stock_code, stock_name, market='US'):
+def get_financial_data_yfinance(stock_code, stock_name, market='US', exchange='US', company_full_name=''):
     """
-    使用yfinance获取财务数据（增强版）
+    使用yfinance获取完整财务数据
     
     改进：
     1. ADR别名映射
     2. 季度失败→年报兜底
     3. 失败原因分级
+    4. 新增市值和市盈率
+    5. 修复港股代码重复后缀问题
+    6. 添加完整的资产负债表、利润表、现金流量表字段
     """
     fail_reason = None
     
     try:
-        # 根据市场调整股票代码格式
-        if market == 'HK':
-            # 港股：添加.HK后缀
-            code = stock_code + '.HK'
+        # 清理股票代码中的不可见字符（零宽字符等）
+        stock_code = ''.join(c for c in str(stock_code) if c.isprintable()).strip()
+        
+        # 根据交易所调整股票代码格式
+        exchange_lower = str(exchange).lower()
+        
+        if 'hk' in exchange_lower or '港' in str(exchange):
+            # 港股：检查是否已有.HK后缀，避免重复添加
+            if '.HK' in stock_code.upper():
+                code = stock_code  # 已有后缀，直接使用
+            else:
+                # 没有后缀，需要补齐5位数字并添加.HK
+                code = stock_code.zfill(5) + '.HK'
+            market = 'HK'
+        elif 'sh' in exchange_lower or '沪' in str(exchange):
+            # 上交所：检查是否已有.SS后缀
+            if '.SS' in stock_code.upper():
+                code = stock_code
+            else:
+                code = stock_code + '.SS'
+            market = 'CN'
+        elif 'sz' in exchange_lower or '深' in str(exchange):
+            # 深交所：检查是否已有.SZ后缀
+            if '.SZ' in stock_code.upper():
+                code = stock_code
+            else:
+                code = stock_code + '.SZ'
+            market = 'CN'
         else:
-            # 美股：使用ADR别名映射
-            code = ADR_ALIAS.get(stock_code, stock_code)
+            # 美股及其他：需要去除东方财富等数据源添加的交易所后缀
+            # .O = 纳斯达克, .N = NYSE, .A = 美国证券交易所
+            # yfinance 中美股代码不需要这些后缀
+            clean_code = stock_code
+            for suffix in ['.O', '.N', '.A', '.K', '.Z']:
+                if clean_code.upper().endswith(suffix):
+                    clean_code = clean_code[:-2]  # 去除后缀
+                    break
+            
+            # 使用ADR别名映射（如果有）
+            code = ADR_ALIAS.get(clean_code, clean_code)
+            market = 'US'
         
         # 创建股票对象
         ticker = yf.Ticker(code)
         
-        # ========== 改进1：季度失败→年报兜底 ==========
+        # ========== 新增：获取市值和市盈率 ==========
+        market_cap = None
+        pe_ratio = None
+        try:
+            info = ticker.info
+            market_cap = info.get('marketCap', None)
+            # 尝试获取市盈率（多个可能的键名）
+            pe_ratio = info.get('trailingPE', None) or info.get('forwardPE', None)
+        except:
+            pass
+        
+        # ========== 获取三大报表数据 ==========
         # 优先尝试季度数据
         try:
             quarterly_income = ticker.quarterly_income_stmt
             quarterly_balance = ticker.quarterly_balance_sheet
+            quarterly_cashflow = ticker.quarterly_cashflow
             is_quarterly = True
         except:
             quarterly_income = pd.DataFrame()
             quarterly_balance = pd.DataFrame()
+            quarterly_cashflow = pd.DataFrame()
             is_quarterly = False
         
         # 如果季度数据为空，降级到年报
         if quarterly_income.empty:
             try:
-                quarterly_income = ticker.income_stmt  # 年报
-                quarterly_balance = ticker.balance_sheet  # 年报
+                quarterly_income = ticker.income_stmt
+                quarterly_balance = ticker.balance_sheet
+                quarterly_cashflow = ticker.cashflow
                 is_quarterly = False
             except:
                 fail_reason = 'NO_DATA'
@@ -369,46 +476,225 @@ def get_financial_data_yfinance(stock_code, stock_name, market='US'):
             return pd.DataFrame()
         
         financial_records = []
-        currency = 'HKD' if market == 'HK' else 'USD'
+        
+        # 根据市场确定币种和单位
+        if market == 'HK':
+            currency = 'HKD'
+            unit = '港元'
+        elif market == 'CN':
+            currency = 'CNY'
+            unit = '人民币元'
+        else:
+            currency = 'USD'
+            unit = '美元'
         
         # 处理数据（季度或年度）
         if not quarterly_income.empty:
-            for date_col in quarterly_income.columns[:8]:  # 最近8个季度
+            for date_col in quarterly_income.columns[:8]:  # 最近8个报告期
                 try:
-                    # 获取资产负债表数据
-                    total_assets = None
-                    total_liabilities = None
+                    # ========== 资产负债表数据 ==========
+                    balance_data = {}
                     if not quarterly_balance.empty and date_col in quarterly_balance.columns:
-                        if 'Total Assets' in quarterly_balance.index:
-                            total_assets = quarterly_balance.loc['Total Assets', date_col]
-                        if 'Total Liabilities Net Minority Interest' in quarterly_balance.index:
-                            total_liabilities = quarterly_balance.loc['Total Liabilities Net Minority Interest', date_col]
+                        # 货币资金
+                        balance_data['货币资金'] = quarterly_balance.loc['Cash And Cash Equivalents', date_col] if 'Cash And Cash Equivalents' in quarterly_balance.index else None
+                        
+                        # 流动资产
+                        balance_data['流动资产'] = quarterly_balance.loc['Current Assets', date_col] if 'Current Assets' in quarterly_balance.index else None
+                        
+                        # 非流动资产 = 总资产 - 流动资产
+                        total_assets = quarterly_balance.loc['Total Assets', date_col] if 'Total Assets' in quarterly_balance.index else None
+                        current_assets = balance_data['流动资产']
+                        if total_assets and current_assets:
+                            balance_data['非流动资产'] = total_assets - current_assets
+                        else:
+                            balance_data['非流动资产'] = None
+                        
+                        balance_data['总资产'] = total_assets
+                        
+                        # 实收资本 (普通股)
+                        balance_data['实收资本'] = quarterly_balance.loc['Common Stock', date_col] if 'Common Stock' in quarterly_balance.index else None
+                        
+                        # 资本公积
+                        balance_data['资本公积'] = quarterly_balance.loc['Capital Stock', date_col] if 'Capital Stock' in quarterly_balance.index else (
+                            quarterly_balance.loc['Additional Paid In Capital', date_col] if 'Additional Paid In Capital' in quarterly_balance.index else None
+                        )
+                        
+                        # 股东权益合计
+                        balance_data['股东权益合计'] = quarterly_balance.loc['Stockholders Equity', date_col] if 'Stockholders Equity' in quarterly_balance.index else (
+                            quarterly_balance.loc['Total Equity Gross Minority Interest', date_col] if 'Total Equity Gross Minority Interest' in quarterly_balance.index else None
+                        )
+                        
+                        # 流动负债
+                        balance_data['流动负债'] = quarterly_balance.loc['Current Liabilities', date_col] if 'Current Liabilities' in quarterly_balance.index else None
+                        
+                        # 总负债
+                        total_liabilities = quarterly_balance.loc['Total Liabilities Net Minority Interest', date_col] if 'Total Liabilities Net Minority Interest' in quarterly_balance.index else None
+                        balance_data['总负债'] = total_liabilities
+                        
+                        # 非流动负债 = 总负债 - 流动负债
+                        current_liabilities = balance_data['流动负债']
+                        if total_liabilities and current_liabilities:
+                            balance_data['非流动负债'] = total_liabilities - current_liabilities
+                        else:
+                            balance_data['非流动负债'] = None
                     
-                    # 获取利润表数据
-                    net_income = quarterly_income.loc['Net Income', date_col] if 'Net Income' in quarterly_income.index else None
-                    total_revenue = quarterly_income.loc['Total Revenue', date_col] if 'Total Revenue' in quarterly_income.index else None
-                    cost_of_revenue = quarterly_income.loc['Cost Of Revenue', date_col] if 'Cost Of Revenue' in quarterly_income.index else None
-                    rd_expense = quarterly_income.loc['Research And Development', date_col] if 'Research And Development' in quarterly_income.index else None
-                    pretax_income = quarterly_income.loc['Pretax Income', date_col] if 'Pretax Income' in quarterly_income.index else None
-                    tax_provision = quarterly_income.loc['Tax Provision', date_col] if 'Tax Provision' in quarterly_income.index else None
+                    # ========== 现金流量表数据 ==========
+                    cashflow_data = {}
+                    if not quarterly_cashflow.empty and date_col in quarterly_cashflow.columns:
+                        # 经营活动现金流
+                        operating_cf = quarterly_cashflow.loc['Operating Cash Flow', date_col] if 'Operating Cash Flow' in quarterly_cashflow.index else None
+                        cashflow_data['经营活动产生的现金流量净额'] = operating_cf
+                        
+                        # 经营性现金流入/流出 (yfinance通常不直接提供，用净额表示)
+                        if operating_cf:
+                            if operating_cf >= 0:
+                                cashflow_data['经营性现金流入'] = operating_cf
+                                cashflow_data['经营性现金流出'] = 0
+                            else:
+                                cashflow_data['经营性现金流入'] = 0
+                                cashflow_data['经营性现金流出'] = abs(operating_cf)
+                        else:
+                            cashflow_data['经营性现金流入'] = None
+                            cashflow_data['经营性现金流出'] = None
+                        
+                        # 投资活动现金流
+                        investing_cf = quarterly_cashflow.loc['Investing Cash Flow', date_col] if 'Investing Cash Flow' in quarterly_cashflow.index else None
+                        cashflow_data['投资活动产生的现金流量净额'] = investing_cf
+                        
+                        if investing_cf:
+                            if investing_cf >= 0:
+                                cashflow_data['投资活动现金流入'] = investing_cf
+                                cashflow_data['投资活动现金流出'] = 0
+                            else:
+                                cashflow_data['投资活动现金流入'] = 0
+                                cashflow_data['投资活动现金流出'] = abs(investing_cf)
+                        else:
+                            cashflow_data['投资活动现金流入'] = None
+                            cashflow_data['投资活动现金流出'] = None
+                        
+                        # 筹资活动现金流
+                        financing_cf = quarterly_cashflow.loc['Financing Cash Flow', date_col] if 'Financing Cash Flow' in quarterly_cashflow.index else None
+                        cashflow_data['筹资活动产生的现金流量净额'] = financing_cf
+                        
+                        if financing_cf:
+                            if financing_cf >= 0:
+                                cashflow_data['筹资活动现金流入'] = financing_cf
+                                cashflow_data['筹资活动现金流出'] = 0
+                            else:
+                                cashflow_data['筹资活动现金流入'] = 0
+                                cashflow_data['筹资活动现金流出'] = abs(financing_cf)
+                        else:
+                            cashflow_data['筹资活动现金流入'] = None
+                            cashflow_data['筹资活动现金流出'] = None
                     
+                    # ========== 利润表数据 ==========
+                    income_data = {}
+                    if not quarterly_income.empty and date_col in quarterly_income.columns:
+                        # 净利润
+                        income_data['净利润'] = quarterly_income.loc['Net Income', date_col] if 'Net Income' in quarterly_income.index else None
+                        
+                        # 营业总收入
+                        total_revenue = quarterly_income.loc['Total Revenue', date_col] if 'Total Revenue' in quarterly_income.index else None
+                        income_data['营业总收入'] = total_revenue
+                        
+                        # 营业收入 (通常等于营业总收入)
+                        income_data['营业收入'] = quarterly_income.loc['Operating Revenue', date_col] if 'Operating Revenue' in quarterly_income.index else total_revenue
+                        
+                        # 营业总成本
+                        total_expenses = quarterly_income.loc['Total Expenses', date_col] if 'Total Expenses' in quarterly_income.index else None
+                        income_data['营业总成本'] = total_expenses
+                        
+                        # 营业成本
+                        cost_of_revenue = quarterly_income.loc['Cost Of Revenue', date_col] if 'Cost Of Revenue' in quarterly_income.index else None
+                        income_data['营业成本'] = cost_of_revenue
+                        
+                        # 研发费用
+                        rd_expense = quarterly_income.loc['Research And Development', date_col] if 'Research And Development' in quarterly_income.index else None
+                        income_data['研发费用'] = rd_expense
+                        
+                        # 营业税金及附加
+                        income_data['营业税金及附加'] = quarterly_income.loc['Tax Effect Of Unusual Items', date_col] if 'Tax Effect Of Unusual Items' in quarterly_income.index else None
+                        
+                        # 营业利润
+                        income_data['营业利润'] = quarterly_income.loc['Operating Income', date_col] if 'Operating Income' in quarterly_income.index else None
+                        
+                        # 营业外收入
+                        income_data['营业外收入'] = quarterly_income.loc['Other Non Operating Income Expenses', date_col] if 'Other Non Operating Income Expenses' in quarterly_income.index else None
+                        
+                        # 营业外成本 (通常包含在其他费用中)
+                        income_data['营业外支出'] = quarterly_income.loc['Other Special Charges', date_col] if 'Other Special Charges' in quarterly_income.index else None
+                        
+                        # 利润总额
+                        pretax_income = quarterly_income.loc['Pretax Income', date_col] if 'Pretax Income' in quarterly_income.index else None
+                        income_data['利润总额'] = pretax_income
+                        
+                        # 所得税
+                        tax_provision = quarterly_income.loc['Tax Provision', date_col] if 'Tax Provision' in quarterly_income.index else None
+                        income_data['所得税'] = tax_provision
+                    
+                    # 组合完整记录
                     record = {
+                        '证券简称': stock_name,
                         '股票代码': stock_code,
-                        '股票简称': stock_name,
+                        '企业全称': company_full_name,
+                        '交易所': exchange,
                         '币种': currency,
+                        '单位': unit,
                         '报告期间': date_col.strftime('%Y-%m-%d'),
-                        '数据类型': 'Q' if is_quarterly else 'A',  # Q=季度, A=年度
-                        '总资产': total_assets,
-                        '总负债': total_liabilities,
-                        '净利润': net_income,
-                        '营业总收入': total_revenue,
-                        '营业总成本': cost_of_revenue,
-                        '研发费用': rd_expense,
-                        '利润总额': pretax_income,
-                        '所得税': tax_provision,
+                        '数据类型': 'Q' if is_quarterly else 'A',
+                        '市值': market_cap,
+                        '市盈率': pe_ratio,
                     }
                     
+                    # 添加资产负债表字段
+                    record.update({
+                        '资产负债表.货币资金': balance_data.get('货币资金'),
+                        '资产负债表.流动资产': balance_data.get('流动资产'),
+                        '资产负债表.非流动资产': balance_data.get('非流动资产'),
+                        '资产负债表.总资产': balance_data.get('总资产'),
+                        '资产负债表.实收资本': balance_data.get('实收资本'),
+                        '资产负债表.资本公积': balance_data.get('资本公积'),
+                        '资产负债表.股东权益合计': balance_data.get('股东权益合计'),
+                        '资产负债表.流动负债': balance_data.get('流动负债'),
+                        '资产负债表.非流动负债': balance_data.get('非流动负债'),
+                        '资产负债表.总负债': balance_data.get('总负债'),
+                    })
+                    
+                    # 添加现金流量表字段
+                    record.update({
+                        '现金流量表.经营性现金流入': cashflow_data.get('经营性现金流入'),
+                        '现金流量表.经营性现金流出': cashflow_data.get('经营性现金流出'),
+                        '现金流量表.经营活动产生的现金流量净额': cashflow_data.get('经营活动产生的现金流量净额'),
+                        '现金流量表.投资活动现金流入': cashflow_data.get('投资活动现金流入'),
+                        '现金流量表.投资活动现金流出': cashflow_data.get('投资活动现金流出'),
+                        '现金流量表.投资活动产生的现金流量净额': cashflow_data.get('投资活动产生的现金流量净额'),
+                        '现金流量表.筹资活动现金流入': cashflow_data.get('筹资活动现金流入'),
+                        '现金流量表.筹资活动现金流出': cashflow_data.get('筹资活动现金流出'),
+                        '现金流量表.筹资活动产生的现金流量净额': cashflow_data.get('筹资活动产生的现金流量净额'),
+                    })
+                    
+                    # 添加利润表字段
+                    record.update({
+                        '利润表.净利润': income_data.get('净利润'),
+                        '利润表.营业总收入': income_data.get('营业总收入'),
+                        '利润表.营业收入': income_data.get('营业收入'),
+                        '利润表.营业总成本': income_data.get('营业总成本'),
+                        '利润表.营业成本': income_data.get('营业成本'),
+                        '利润表.研发费用': income_data.get('研发费用'),
+                        '利润表.营业税金及附加': income_data.get('营业税金及附加'),
+                        '利润表.营业利润': income_data.get('营业利润'),
+                        '利润表.营业外收入': income_data.get('营业外收入'),
+                        '利润表.营业外支出': income_data.get('营业外支出'),
+                        '利润表.利润总额': income_data.get('利润总额'),
+                        '利润表.所得税': income_data.get('所得税'),
+                    })
+                    
                     # 计算衍生指标
+                    total_revenue = income_data.get('营业总收入')
+                    rd_expense = income_data.get('研发费用')
+                    cost_of_revenue = income_data.get('营业成本')
+                    total_assets = balance_data.get('总资产')
+                    
                     if total_revenue and rd_expense and total_revenue != 0:
                         record['研发投入占比'] = (rd_expense / total_revenue) * 100
                     else:
@@ -436,15 +722,11 @@ def get_financial_data_yfinance(stock_code, stock_name, market='US'):
         return pd.DataFrame()
 
 
-def collect_financial_data(company_list, market='US'):
-    """批量采集财务数据（增强版：失败分级）"""
-    print(f"\n开始采集 {market} 市场财务数据...")
+def collect_financial_data(company_list):
+    """批量采集财务数据（增强版：支持多市场）"""
+    print(f"\n开始采集财务数据...")
     print(f"共需处理 {len(company_list)} 家企业")
-    
-    if market == 'HK':
-        print(f"数据源: akshare (东方财富)")
-    else:
-        print(f"数据源: yfinance (季度→年报兜底)")
+    print(f"数据源: yfinance (季度→年报兜底)")
     print()
     
     all_financial_data = []
@@ -456,22 +738,19 @@ def collect_financial_data(company_list, market='US'):
     for idx, row in company_list.iterrows():
         stock_code = row['股票代码']
         stock_name = row['股票简称']
+        company_full_name = row.get('企业全称', stock_name)
+        exchange = row.get('上市交易所', 'US')
         
-        print(f"  [{idx+1}/{len(company_list)}] {stock_name} ({stock_code})...", end=' ')
+        print(f"  [{idx+1}/{len(company_list)}] {stock_name} ({stock_code} @ {exchange})...", end=' ')
         
-        # 根据市场选择数据源
-        if market == 'HK':
-            # 港股使用akshare（yfinance对港股支持很差）
-            financial_df = get_financial_data_hk_akshare(stock_code, stock_name)
-            data_type = ''
+        # 使用 yfinance 获取财务数据（支持多市场）
+        financial_df = get_financial_data_yfinance(stock_code, stock_name, exchange=exchange, company_full_name=company_full_name)
+        
+        # 判断数据类型
+        if not financial_df.empty:
+            data_type = financial_df.iloc[0].get('数据类型', 'Q')
         else:
-            # 美股使用yfinance
-            financial_df = get_financial_data_yfinance(stock_code, stock_name, market)
-            # 判断数据类型
-            if not financial_df.empty:
-                data_type = financial_df.iloc[0].get('数据类型', 'Q')
-            else:
-                data_type = ''
+            data_type = ''
         
         if not financial_df.empty:
             all_financial_data.append(financial_df)
@@ -494,9 +773,9 @@ def collect_financial_data(company_list, market='US'):
     
     # 详细统计
     print(f"\n采集完成: 成功 {success_count} 家, 失败 {fail_count} 家")
-    if market == 'US' and (quarterly_count > 0 or annual_count > 0):
+    if quarterly_count > 0 or annual_count > 0:
         print(f"  数据类型: 季度 {quarterly_count} 家, 年度 {annual_count} 家")
-        print(f"  成功率: {success_count}/{len(company_list)} = {success_count/len(company_list)*100:.1f}%")
+    print(f"  成功率: {success_count}/{len(company_list)} = {success_count/len(company_list)*100:.1f}%")
     
     if all_financial_data:
         result = pd.concat(all_financial_data, ignore_index=True)
@@ -509,72 +788,52 @@ def collect_financial_data(company_list, market='US'):
 
 if __name__ == "__main__":
     print("\n" + "="*60)
-    print("【中概股财务数据采集系统 - 混合方案】")
+    print("【股票财务数据采集系统】")
     print(f"启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("="*60)
     print("\n策略说明:")
-    print("  - 美股列表: akshare 获取中概股")
-    print("  - 港股列表: akshare 按市值排序")
-    print("  - 美股财务: yfinance (稳定)")
-    print("  - 港股财务: akshare (东方财富)")
+    print(f"  - 股票列表: 从 {COMPANY_LIST_FILE} 读取")
+    print("  - 财务数据: yfinance (支持美股、港股等多市场)")
+    print("  - 新增指标: 市值、市盈率")
     print("="*60)
     
     # 检查依赖
-    if not AKSHARE_AVAILABLE:
-        print("\n❌ 未安装 akshare 库")
-        print("   请运行: pip install akshare")
-        input("\n按回车键退出...")
-        exit(1)
-    
     if not YFINANCE_AVAILABLE:
         print("\n❌ 未安装 yfinance 库")
         print("   请运行: pip install yfinance")
         input("\n按回车键退出...")
         exit(1)
     
-    print("\n✅ 所有依赖已安装")
+    print("\n✅ yfinance 依赖已安装")
     
     if TEST_MODE:
         print(f"\n🚩 测试模式：每个市场 {TEST_LIMIT} 家企业")
         print("   设置 TEST_MODE = False 启用全量模式")
     
-    # ==================== 步骤1: 获取中概股名单 ====================
+    # ==================== 步骤1: 获取股票名单 ====================
     print("\n" + "="*60)
-    print("【步骤 1】获取中概股名单")
+    print("【步骤 1】从Excel读取股票名单")
     print("="*60)
     
-    # 获取美股
-    df_us = get_us_stocks_list()
-    if not df_us.empty:
-        print(f"  ✅ 美股: {len(df_us)} 家")
-    else:
-        print(f"  ⚠️  美股: 获取失败")
-
-    # 获取港股
-    df_hk = get_hk_stocks_list()
-    if not df_hk.empty:
-        print(f"  ✅ 港股: {len(df_hk)} 家")
-    else:
-        print(f"  ⚠️  港股: 获取失败")
+    # 从Excel获取股票列表
+    all_companies = get_stocks_from_excel()
     
     # 检查是否有数据
-    if df_us.empty and df_hk.empty:
-        print("\n❌ 未能获取任何企业名单")
+    if all_companies.empty:
+        print("\n❌ 未能读取任何股票数据")
         print("\n建议:")
-        print("  1. 检查网络连接")
-        print("  2. 稍后再试")
-        print("  3. 或使用 main_yfinance.py 手动导入CSV")
+        print(f"  1. 检查文件是否存在: {COMPANY_LIST_FILE}")
+        print("  2. 检查文件格式是否正确（需要包含 code 和 exchange 列）")
         input("\n按回车键退出...")
         exit(1)
     
-    # 合并企业名单
-    all_companies = pd.concat([df_us, df_hk], ignore_index=True)
+    print(f"\n✅ 成功读取 {len(all_companies)} 只股票")
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     suffix = "_测试" if TEST_MODE else ""
     
     # 导出企业名单
-    company_file = f"中概股企业名单{suffix}_{timestamp}.xlsx"
-    all_companies.to_excel(company_file, index=False)
+    company_file = f"股票企业名单{suffix}_{timestamp}.csv"
+    all_companies.to_csv(company_file, index=False, encoding='utf-8-sig')
     print(f"\n✅ 企业名单已导出: {company_file}")
     print(f"   总计: {len(all_companies)} 家")
     
@@ -583,48 +842,92 @@ if __name__ == "__main__":
     print("【步骤 2】采集财务数据")
     print("="*60)
     
-    # 美股财务数据
-    us_financial_data = pd.DataFrame()
-    if not df_us.empty:
-        us_financial_data = collect_financial_data(df_us, market='US')
-    
-    # 港股财务数据
-    hk_financial_data = pd.DataFrame()
-    if not df_hk.empty:
-        hk_financial_data = collect_financial_data(df_hk, market='HK')
+    # 采集所有股票的财务数据
+    all_financial_data = collect_financial_data(all_companies)
     
     # 合并并导出
-    if not us_financial_data.empty or not hk_financial_data.empty:
-        all_financial_data = pd.concat([us_financial_data, hk_financial_data], ignore_index=True)
-        
-        # 调整列顺序
+    if not all_financial_data.empty:
+        # 按照用户要求的列顺序调整
         columns_order = [
-            '股票代码', '股票简称', '币种', '报告期间',
-            '总资产', '总负债', '净利润', '营业总收入', '营业总成本',
-            '研发费用', '利润总额', '所得税',
-            '研发投入占比', '毛利率', '总资产周转率'
+            # 基本信息
+            '证券简称',
+            '股票代码',
+            '企业全称',
+            '交易所',
+            '币种',
+            '单位',
+            '报告期间',
+            '数据类型',
+            '市值',
+            '市盈率',
+            
+            # 资产负债表
+            '资产负债表.货币资金',
+            '资产负债表.流动资产',
+            '资产负债表.非流动资产',
+            '资产负债表.总资产',
+            '资产负债表.实收资本',
+            '资产负债表.资本公积',
+            '资产负债表.股东权益合计',
+            '资产负债表.流动负债',
+            '资产负债表.非流动负债',
+            '资产负债表.总负债',
+            
+            # 现金流量表
+            '现金流量表.经营性现金流入',
+            '现金流量表.经营性现金流出',
+            '现金流量表.经营活动产生的现金流量净额',
+            '现金流量表.投资活动现金流入',
+            '现金流量表.投资活动现金流出',
+            '现金流量表.投资活动产生的现金流量净额',
+            '现金流量表.筹资活动现金流入',
+            '现金流量表.筹资活动现金流出',
+            '现金流量表.筹资活动产生的现金流量净额',
+            
+            # 利润表
+            '利润表.净利润',
+            '利润表.营业总收入',
+            '利润表.营业收入',
+            '利润表.营业总成本',
+            '利润表.营业成本',
+            '利润表.研发费用',
+            '利润表.营业税金及附加',
+            '利润表.营业利润',
+            '利润表.营业外收入',
+            '利润表.营业外支出',
+            '利润表.利润总额',
+            '利润表.所得税',
+            
+            # 衍生指标
+            '研发投入占比',
+            '毛利率',
+            '总资产周转率',
         ]
         
-        # 如果有数据类型列，也保留
-        if '数据类型' in all_financial_data.columns:
-            columns_order.insert(4, '数据类型')
-        
+        # 只保留存在的列
+        columns_order = [col for col in columns_order if col in all_financial_data.columns]
         all_financial_data = all_financial_data[columns_order]
         
-        # 导出Excel
-        financial_file = f"中概股财务数据{suffix}_{timestamp}.xlsx"
+        # 导出CSV
+        financial_file = f"财务数据{suffix}_{timestamp}.csv"
         
-        with pd.ExcelWriter(financial_file, engine='openpyxl') as writer:
-            all_financial_data.to_excel(writer, sheet_name='全部财务数据', index=False)
-            
-            if not us_financial_data.empty:
-                us_financial_data[columns_order].to_excel(writer, sheet_name='美股财务数据', index=False)
-            
-            if not hk_financial_data.empty:
-                hk_financial_data[columns_order].to_excel(writer, sheet_name='港股财务数据', index=False)
-        
+        # 导出主文件
+        all_financial_data.to_csv(financial_file, index=False, encoding='utf-8-sig')
         print(f"\n✅ 财务数据已导出: {financial_file}")
         print(f"   总计: {len(all_financial_data)} 条记录")
+        
+        # 按交易所分组导出（可选）
+        export_by_exchange = False  # 可以设置为 True 来按交易所分别导出
+        if export_by_exchange:
+            print("\n按交易所分组导出:")
+            for exchange in all_companies['上市交易所'].unique():
+                exchange_data = all_financial_data[all_financial_data['股票代码'].isin(
+                    all_companies[all_companies['上市交易所']==exchange]['股票代码']
+                )]
+                if not exchange_data.empty:
+                    exchange_file = f"财务数据_{exchange}{suffix}_{timestamp}.csv"
+                    exchange_data.to_csv(exchange_file, index=False, encoding='utf-8-sig')
+                    print(f"  ✅ {exchange}: {exchange_file}")
     else:
         print("\n⚠️  未获取到任何财务数据")
     
@@ -633,13 +936,14 @@ if __name__ == "__main__":
     print("【任务完成总结】")
     print("="*60)
     print(f"✅ 企业名单: {len(all_companies)} 家")
-    print(f"   - 美股: {len(df_us)} 家")
-    print(f"   - 港股: {len(df_hk)} 家")
     
-    if not us_financial_data.empty or not hk_financial_data.empty:
-        print(f"✅ 财务数据: {len(all_financial_data)} 条记录")
-        print(f"   - 美股记录: {len(us_financial_data)}")
-        print(f"   - 港股记录: {len(hk_financial_data)}")
+    # 按交易所统计
+    exchange_counts = all_companies['上市交易所'].value_counts()
+    for exchange, count in exchange_counts.items():
+        print(f"   - {exchange}: {count} 家")
+    
+    if not all_financial_data.empty:
+        print(f"\n✅ 财务数据: {len(all_financial_data)} 条记录")
         
         # 成功率统计
         total_companies = len(all_companies)
@@ -649,7 +953,7 @@ if __name__ == "__main__":
     
     print(f"\n📁 生成文件:")
     print(f"   1. {company_file}")
-    if not us_financial_data.empty or not hk_financial_data.empty:
+    if not all_financial_data.empty:
         print(f"   2. {financial_file}")
     
     print(f"\n完成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
