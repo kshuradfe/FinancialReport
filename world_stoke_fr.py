@@ -1,15 +1,29 @@
 """
-股票财务数据采集 - 完整财报数据
+美股市场财务数据采集 - 全量美股财报数据
 
 策略：
-1. 从 Company_List.xlsx 读取股票列表（包括美股、港股、其他国家）
-2. 使用 yfinance 获取完整财务报表数据
-3. 包含资产负债表、利润表、现金流量表
+1. 从 Nasdaq 官方 FTP 自动获取全部美股列表
+2. 智能过滤：自动排除 ETF、权证、债券等无财报产品
+3. 使用 yfinance 获取完整财务报表数据（资产负债表、利润表、现金流量表）
 
-优点：
-- 直接从本地文件读取股票列表，无需调用API获取
-- 支持多个市场（美股、港股等）
-- 获取完整的三大财务报表数据
+数据来源：
+- Nasdaq Trader FTP: ftp://ftp.nasdaqtrader.com
+- 包含 NASDAQ、NYSE、NYSE American、NYSE Arca、BATS、IEX 等所有美国交易所
+- 官方数据，每日更新，完全免费
+
+过滤规则：
+自动排除以下类型（这些产品没有财务报表）：
+- ETF（交易所交易基金）
+- Warrant/Rights（认股权证）
+- Units（股票+权证组合）
+- Preferred Stock（优先股）
+- Bond/Note（债券）
+- Leveraged Products（杠杆产品）
+
+预期结果：
+- 原始股票数：8,000-10,000 只
+- 过滤后（有财报）：约 4,000-5,000 只普通股和 ADR
+- 成功率：预计 70-85%（部分小型股可能无财报）
 """
 
 import pandas as pd
@@ -33,17 +47,18 @@ except ImportError:
     print("❌ yfinance未安装，请运行: pip install yfinance")
 
 # ================= 配置区 =================
-TEST_MODE = False
-TEST_LIMIT = 30  # 测试模式下每个市场的数量
-
-# 公司列表文件路径
-COMPANY_LIST_FILE = "Company_List.xlsx"
+TEST_MODE = True
+TEST_LIMIT = 30  # 测试模式下的股票数量
 
 # 财务数据请求延迟
 REQUEST_DELAY = 0.5
 
 # 获取名单时的重试次数
 MAX_RETRIES = 3
+
+# 是否过滤掉市值过小的股票（建议开启，避免垃圾股）
+FILTER_BY_MARKET_CAP = True
+MIN_MARKET_CAP = 100_000_000  # 最小市值（美元），1亿美元
 
 # ADR及特殊ticker别名映射表（解决ticker不匹配问题）
 # 注意：yfinance 中美股代码通常不需要后缀，直接使用代码即可
@@ -105,63 +120,191 @@ US_CHINA_STOCKS = [
 # =========================================
 
 
-def get_stocks_from_excel():
-    """
-    从 Company_List.xlsx 读取股票列表
-    返回按交易所分类的股票DataFrame
-    """
-    print(f"\n正在从 {COMPANY_LIST_FILE} 读取股票列表...")
+def get_nasdaq_stocks():
+    """从 Nasdaq 官方 FTP 获取 NASDAQ 交易所完整股票列表"""
+    print("\n正在从 Nasdaq 官方获取股票列表...")
     
     try:
-        df = pd.read_excel(COMPANY_LIST_FILE)
-        print(f"  ✅ 读取成功: {len(df)} 只股票")
+        # Nasdaq 官方 FTP 服务器提供的股票列表（实时更新）
+        url = "ftp://ftp.nasdaqtrader.com/SymbolDirectory/nasdaqlisted.txt"
         
-        # 检查必需的列
-        required_columns = ['code', 'exchange']
-        if not all(col in df.columns for col in required_columns):
-            print(f"  ❌ 缺少必需列: {required_columns}")
-            return pd.DataFrame()
+        print("  ⏳ 正在从 Nasdaq FTP 下载...")
+        df = pd.read_csv(url, sep='|')
+        
+        # 移除最后一行（统计信息）
+        df = df[:-1]
+        
+        # 过滤掉测试股票
+        df = df[df['Test Issue'] == 'N']
+        
+        # 过滤掉 ETF（ETF 没有财务报表）
+        df = df[df['ETF'] == 'N']
+        
+        initial_count = len(df)
+        
+        # 过滤掉特殊证券类型（这些通常没有完整财务报表）
+        # 排除：Warrant, Right, Unit, Preferred Stock 等
+        exclude_keywords = [
+            'ETF', 'Fund', 'Trust',  # 基金类
+            'Warrant', 'Rights', 'Right',  # 权证类
+            'Unit', 'Units',  # 单位（通常是股票+权证组合）
+            'Preferred',  # 优先股
+            'Note', 'Bond', 'Debenture',  # 债券类
+            'Index', 'Leverag',  # 指数和杠杆产品
+        ]
+        
+        # 基于证券名称过滤
+        for keyword in exclude_keywords:
+            df = df[~df['Security Name'].str.contains(keyword, case=False, na=False)]
+        
+        filtered_count = initial_count - len(df)
+        
+        result = pd.DataFrame()
+        result['股票代码'] = df['Symbol']
+        result['股票简称'] = df['Security Name']
+        result['企业全称'] = df['Security Name']
+        result['上市交易所'] = 'NASDAQ'
+        result['币种'] = 'USD'
+        
+        print(f"  ✅ NASDAQ: {len(result)} 只股票（过滤掉 {filtered_count} 只 ETF/权证等）")
+        return result
+        
+    except Exception as e:
+        print(f"  ❌ Nasdaq 获取失败: {e}")
+        return pd.DataFrame()
+
+
+def get_nyse_stocks():
+    """从 Nasdaq 官方 FTP 获取 NYSE 和其他交易所的股票列表"""
+    print("\n正在从 Nasdaq 官方获取 NYSE 等交易所股票列表...")
+    
+    try:
+        # 包含 NYSE, NYSE American, NYSE Arca 等交易所
+        url = "ftp://ftp.nasdaqtrader.com/SymbolDirectory/otherlisted.txt"
+        
+        print("  ⏳ 正在从 Nasdaq FTP 下载...")
+        df = pd.read_csv(url, sep='|')
+        
+        # 移除最后一行
+        df = df[:-1]
+        
+        # 过滤掉测试股票
+        df = df[df['Test Issue'] == 'N']
+        
+        # 过滤掉 ETF
+        df = df[df['ETF'] == 'N']
+        
+        initial_count = len(df)
+        
+        # 过滤掉特殊证券类型（没有完整财务报表的）
+        exclude_keywords = [
+            'ETF', 'Fund', 'Trust',  # 基金类
+            'Warrant', 'Rights', 'Right',  # 权证类
+            'Unit', 'Units',  # 单位
+            'Preferred',  # 优先股
+            'Note', 'Bond', 'Debenture',  # 债券类
+            'Index', 'Leverag',  # 指数和杠杆产品
+        ]
+        
+        # 基于证券名称过滤
+        for keyword in exclude_keywords:
+            df = df[~df['Security Name'].str.contains(keyword, case=False, na=False)]
+        
+        filtered_count = initial_count - len(df)
+        
+        result = pd.DataFrame()
+        result['股票代码'] = df['ACT Symbol']
+        result['股票简称'] = df['Security Name']
+        result['企业全称'] = df['Security Name']
+        result['上市交易所'] = df['Exchange']
+        result['币种'] = 'USD'
+        
+        print(f"  ✅ NYSE等交易所: {len(result)} 只股票（过滤掉 {filtered_count} 只 ETF/权证等）")
         
         # 显示交易所分布
-        print("\n  📊 交易所分布:")
-        exchange_counts = df['exchange'].value_counts()
-        for exchange, count in exchange_counts.items():
+        exchange_map = {
+            'A': 'NYSE American',
+            'N': 'NYSE',
+            'P': 'NYSE Arca',
+            'Z': 'BATS',
+            'V': 'IEX'
+        }
+        result['上市交易所'] = result['上市交易所'].map(exchange_map).fillna(result['上市交易所'])
+        
+        print("  📊 交易所分布:")
+        for exchange, count in result['上市交易所'].value_counts().items():
             print(f"     {exchange}: {count} 只")
-        
-        # 标准化列名以匹配原有逻辑
-        result = pd.DataFrame()
-        result['股票代码'] = df['code'].astype(str)
-        result['股票简称'] = df['short'] if 'short' in df.columns else (df['name'] if 'name' in df.columns else df['code'])
-        result['企业全称'] = df['name'] if 'name' in df.columns else result['股票简称']
-        result['上市交易所'] = df['exchange']
-        
-        # 根据交易所设置币种
-        def get_currency(exchange):
-            exchange_lower = str(exchange).lower()
-            if 'hk' in exchange_lower or '港' in str(exchange):
-                return 'HKD'
-            elif 'us' in exchange_lower or 'nasdaq' in exchange_lower or 'nyse' in exchange_lower:
-                return 'USD'
-            elif 'sh' in exchange_lower or 'sz' in exchange_lower or '沪' in str(exchange) or '深' in str(exchange):
-                return 'CNY'
-            else:
-                return 'USD'  # 默认
-        
-        result['币种'] = result['上市交易所'].apply(get_currency)
-        
-        # 测试模式截断
-        if TEST_MODE:
-            print(f"\n  [测试模式] 仅使用前 {TEST_LIMIT} 只股票")
-            result = result.head(TEST_LIMIT)
         
         return result
         
-    except FileNotFoundError:
-        print(f"  ❌ 文件未找到: {COMPANY_LIST_FILE}")
-        return pd.DataFrame()
     except Exception as e:
-        print(f"  ❌ 读取失败: {e}")
+        print(f"  ❌ NYSE等交易所获取失败: {e}")
         return pd.DataFrame()
+
+
+def get_all_us_stocks():
+    """
+    从 Nasdaq 官方 FTP 获取全部美国市场股票列表
+    
+    数据源：Nasdaq Trader FTP 服务器（官方、实时、免费）
+    - ftp://ftp.nasdaqtrader.com/SymbolDirectory/
+    - 包含 NASDAQ、NYSE、NYSE American、NYSE Arca、BATS、IEX 等所有美国交易所
+    - 每日更新，包含约 8,000-10,000 只股票
+    """
+    print("\n正在获取美国市场全部股票列表...")
+    print("="*60)
+    print("📍 数据源：Nasdaq 官方 FTP 服务器")
+    
+    all_stocks = []
+    
+    # 获取 NASDAQ 交易所股票
+    nasdaq_stocks = get_nasdaq_stocks()
+    if not nasdaq_stocks.empty:
+        all_stocks.append(nasdaq_stocks)
+    
+    # 获取 NYSE 等其他交易所股票
+    nyse_stocks = get_nyse_stocks()
+    if not nyse_stocks.empty:
+        all_stocks.append(nyse_stocks)
+    
+    if not all_stocks:
+        print("\n  ❌ 从官方源获取失败")
+        print("\n  可能原因:")
+        print("  1. 网络连接问题")
+        print("  2. 防火墙阻止 FTP 连接（端口 21）")
+        print("  3. FTP 服务器暂时不可用")
+        print("\n  建议:")
+        print("  - 检查网络连接")
+        print("  - 检查防火墙设置")
+        print("  - 稍后重试")
+        
+        return pd.DataFrame()
+    
+    # 合并所有交易所数据
+    result = pd.concat(all_stocks, ignore_index=True)
+    
+    print("\n" + "="*60)
+    print(f"✅ 总计: {len(result)} 只美股")
+    
+    # 去重（基于股票代码）
+    initial_count = len(result)
+    result = result.drop_duplicates(subset=['股票代码'], keep='first')
+    if initial_count != len(result):
+        print(f"   去重: {initial_count} → {len(result)} 只")
+    
+    # 按交易所统计
+    print("\n📊 交易所分布:")
+    for exchange, count in result['上市交易所'].value_counts().items():
+        print(f"   {exchange}: {count} 只")
+    
+    # 测试模式截断
+    if TEST_MODE:
+        print(f"\n🚩 [测试模式] 仅使用前 {TEST_LIMIT} 只股票")
+        result = result.head(TEST_LIMIT)
+    
+    print(f"\n📊 最终股票数: {len(result)} 只")
+    
+    return result
 
 
 def get_us_stocks_list_old():
@@ -805,12 +948,14 @@ def collect_financial_data(company_list):
 
 if __name__ == "__main__":
     print("\n" + "="*60)
-    print("【股票财务数据采集系统】")
+    print("【美股市场财务数据采集系统】")
     print(f"启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("="*60)
     print("\n策略说明:")
-    print(f"  - 股票列表: 从 {COMPANY_LIST_FILE} 读取")
-    print("  - 财务数据: yfinance (支持美股、港股等多市场)")
+    print("  - 股票列表: Nasdaq 官方 FTP 获取全部美股")
+    print("  - 数据范围: NASDAQ、NYSE、NYSE American、NYSE Arca、BATS、IEX 等")
+    print("  - 预计股票数: 8,000 - 10,000 只")
+    print("  - 财务数据: yfinance 获取完整财报")
     print("  - 输出数据: 资产负债表、利润表、现金流量表")
     print("="*60)
     
@@ -824,35 +969,36 @@ if __name__ == "__main__":
     print("\n✅ yfinance 依赖已安装")
     
     if TEST_MODE:
-        print(f"\n🚩 测试模式：每个市场 {TEST_LIMIT} 家企业")
+        print(f"\n🚩 测试模式：仅处理 {TEST_LIMIT} 只股票")
         print("   设置 TEST_MODE = False 启用全量模式")
     
     # ==================== 步骤1: 获取股票名单 ====================
     print("\n" + "="*60)
-    print("【步骤 1】从Excel读取股票名单")
+    print("【步骤 1】获取美国市场全部股票")
     print("="*60)
     
-    # 从Excel获取股票列表
-    all_companies = get_stocks_from_excel()
+    # 获取全部美股列表
+    all_companies = get_all_us_stocks()
     
     # 检查是否有数据
     if all_companies.empty:
-        print("\n❌ 未能读取任何股票数据")
+        print("\n❌ 未能获取任何股票数据")
         print("\n建议:")
-        print(f"  1. 检查文件是否存在: {COMPANY_LIST_FILE}")
-        print("  2. 检查文件格式是否正确（需要包含 code 和 exchange 列）")
+        print("  1. 检查网络连接（需要访问 ftp.nasdaqtrader.com）")
+        print("  2. 检查防火墙是否允许 FTP 连接（端口 21）")
+        print("  3. 稍后重试")
         input("\n按回车键退出...")
         exit(1)
     
-    print(f"\n✅ 成功读取 {len(all_companies)} 只股票")
+    print(f"\n✅ 成功获取 {len(all_companies)} 只美股")
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    suffix = "_测试" if TEST_MODE else ""
+    suffix = "_测试" if TEST_MODE else "_全量"
     
     # 导出企业名单
-    company_file = f"股票企业名单{suffix}_{timestamp}.csv"
+    company_file = f"美股企业名单{suffix}_{timestamp}.csv"
     all_companies.to_csv(company_file, index=False, encoding='utf-8-sig')
     print(f"\n✅ 企业名单已导出: {company_file}")
-    print(f"   总计: {len(all_companies)} 家")
+    print(f"   总计: {len(all_companies)} 只美股")
     
     # ==================== 步骤2: 采集财务数据 ====================
     print("\n" + "="*60)
@@ -924,25 +1070,15 @@ if __name__ == "__main__":
         all_financial_data = all_financial_data[columns_order]
         
         # 导出CSV
-        financial_file = f"财务数据{suffix}_{timestamp}.csv"
+        financial_file = f"美股财务数据{suffix}_{timestamp}.csv"
         
         # 导出主文件
         all_financial_data.to_csv(financial_file, index=False, encoding='utf-8-sig')
         print(f"\n✅ 财务数据已导出: {financial_file}")
         print(f"   总计: {len(all_financial_data)} 条记录")
         
-        # 按交易所分组导出（可选）
-        export_by_exchange = False  # 可以设置为 True 来按交易所分别导出
-        if export_by_exchange:
-            print("\n按交易所分组导出:")
-            for exchange in all_companies['上市交易所'].unique():
-                exchange_data = all_financial_data[all_financial_data['股票代码'].isin(
-                    all_companies[all_companies['上市交易所']==exchange]['股票代码']
-                )]
-                if not exchange_data.empty:
-                    exchange_file = f"财务数据_{exchange}{suffix}_{timestamp}.csv"
-                    exchange_data.to_csv(exchange_file, index=False, encoding='utf-8-sig')
-                    print(f"  ✅ {exchange}: {exchange_file}")
+        # 注意：由于数据量可能很大，全量美股财报文件会非常大
+        # 建议使用数据库或者按批次处理
     else:
         print("\n⚠️  未获取到任何财务数据")
     
@@ -950,12 +1086,7 @@ if __name__ == "__main__":
     print("\n" + "="*60)
     print("【任务完成总结】")
     print("="*60)
-    print(f"✅ 企业名单: {len(all_companies)} 家")
-    
-    # 按交易所统计
-    exchange_counts = all_companies['上市交易所'].value_counts()
-    for exchange, count in exchange_counts.items():
-        print(f"   - {exchange}: {count} 家")
+    print(f"✅ 美股总数: {len(all_companies)} 只")
     
     if not all_financial_data.empty:
         print(f"\n✅ 财务数据: {len(all_financial_data)} 条记录")
@@ -965,6 +1096,14 @@ if __name__ == "__main__":
         companies_with_data = len(all_financial_data[['股票代码']].drop_duplicates())
         success_rate = (companies_with_data / total_companies) * 100 if total_companies > 0 else 0
         print(f"\n📊 数据覆盖率: {companies_with_data}/{total_companies} ({success_rate:.1f}%)")
+        
+        # 数据类型统计
+        if '数据类型' in all_financial_data.columns:
+            data_type_counts = all_financial_data['数据类型'].value_counts()
+            print(f"\n📈 数据类型分布:")
+            for dtype, count in data_type_counts.items():
+                type_name = "季度" if dtype == 'Q' else "年度"
+                print(f"   - {type_name}数据: {count} 条")
     
     print(f"\n📁 生成文件:")
     print(f"   1. {company_file}")
@@ -974,11 +1113,16 @@ if __name__ == "__main__":
     print(f"\n完成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("="*60)
     
-    if not TEST_MODE:
-        print("\n💡 提示:")
-        print("   - 部分企业财务数据可能获取失败（正常现象）")
-        print("   - 可以重新运行程序获取失败的数据")
-        print("   - 或手动补充缺失的数据")
+    print("\n💡 提示:")
+    if TEST_MODE:
+        print("   - 当前为测试模式，仅处理部分股票")
+        print("   - 设置 TEST_MODE = False 可获取全量数据")
+    else:
+        print("   - 全量模式：处理全部美股（可能需要数小时）")
+        print("   - 建议首次使用测试模式验证流程")
+    print("   - 部分企业财务数据可能获取失败（正常现象）")
+    print("   - yfinance 有访问频率限制，请合理设置延迟")
+    print("   - 生成的CSV文件可能很大，建议使用数据库存储")
     
     input("\n按回车键退出...")
 
