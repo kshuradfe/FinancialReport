@@ -120,6 +120,34 @@ US_CHINA_STOCKS = [
 # =========================================
 
 
+def clean_stock_name(name):
+    """
+    清理股票简称，去掉证券类型后缀
+    """
+    if not isinstance(name, str):
+        return name
+    
+    # 需要去除的后缀模式
+    suffixes_to_remove = [
+        ' - Common Stock',
+        ' - Common Shares',
+        ' - Class A Common Stock',
+        ' - Class A Ordinary Shares',
+        ' - Class B Common Stock',
+        ' - American Depositary Shares',
+        ' - American Depository Shares',
+        ' - Ordinary Shares',
+        ' - Depositary Shares',
+    ]
+    
+    cleaned_name = name
+    for suffix in suffixes_to_remove:
+        if suffix in cleaned_name:
+            cleaned_name = cleaned_name.replace(suffix, '')
+    
+    return cleaned_name.strip()
+
+
 def get_nasdaq_stocks():
     """从 Nasdaq 官方 FTP 获取 NASDAQ 交易所完整股票列表"""
     print("\n正在从 Nasdaq 官方获取股票列表...")
@@ -161,8 +189,8 @@ def get_nasdaq_stocks():
         
         result = pd.DataFrame()
         result['股票代码'] = df['Symbol']
-        result['股票简称'] = df['Security Name']
-        result['企业全称'] = df['Security Name']
+        result['股票简称'] = df['Security Name'].apply(clean_stock_name)  # 简称去掉后缀
+        result['企业全称'] = df['Security Name']  # 全称保留后缀
         result['上市交易所'] = 'NASDAQ'
         result['币种'] = 'USD'
         
@@ -214,8 +242,8 @@ def get_nyse_stocks():
         
         result = pd.DataFrame()
         result['股票代码'] = df['ACT Symbol']
-        result['股票简称'] = df['Security Name']
-        result['企业全称'] = df['Security Name']
+        result['股票简称'] = df['Security Name'].apply(clean_stock_name)  # 简称去掉后缀
+        result['企业全称'] = df['Security Name']  # 全称保留后缀
         result['上市交易所'] = df['Exchange']
         result['币种'] = 'USD'
         
