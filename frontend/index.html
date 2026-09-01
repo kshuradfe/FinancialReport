@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="description" content="FinScope — 全球股票财报数据采集台" />
+    <title>FinScope · 全球财报数据采集台</title>
+    <script>
+      // apply the stored theme before first paint to avoid a white flash
+      try {
+        document.documentElement.dataset.theme =
+          localStorage.getItem('finscope.theme') || 'light';
+      } catch (e) {}
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

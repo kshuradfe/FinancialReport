@@ -1,0 +1,80 @@
+/* ------------------------------------------------------------------
+   FinScope design tokens
+
+   Palette: warm paper + ink, with a single deep sea-green accent.
+   Financial semantics stay muted (moss / brick) so a dense table never
+   turns into a christmas tree.
+   ------------------------------------------------------------------ */
+
+:root {
+  color-scheme: light;
+
+  --bg: #faf9f6;
+  --bg-grid: #efece5;
+  --surface: #ffffff;
+  --surface-2: #f5f3ee;
+  --surface-3: #edeae3;
+  --border: #e5e1d8;
+  --border-strong: #d3cec2;
+
+  --text: #1b1a17;
+  --text-2: #6a655c;
+  --text-3: #9b958a;
+  --text-inv: #fbfaf7;
+
+  --accent: #0f6a5a;
+  --accent-hover: #0c574a;
+  --accent-soft: #e3f0eb;
+  --accent-ring: rgba(15, 106, 90, 0.22);
+
+  --pos: #1f7a4d;
+  --neg: #b03a30;
+  --warn: #9c6b14;
+  --info: #2e6099;
+
+  --shadow-sm: 0 1px 2px rgba(27, 26, 23, 0.05);
+  --shadow-md: 0 6px 22px -10px rgba(27, 26, 23, 0.22);
+  --shadow-pop: 0 12px 40px -12px rgba(27, 26, 23, 0.28);
+
+  --radius-sm: 5px;
+  --radius: 8px;
+  --radius-lg: 13px;
+
+  --sans: 'Inter Variable', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);
+  --dur: 140ms;
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --bg: #0e100f;
+  --bg-grid: #171a18;
+  --surface: #151917;
+  --surface-2: #1b201d;
+  --surface-3: #232926;
+  --border: #262c29;
+  --border-strong: #353d39;
+
+  --text: #e9eae5;
+  --text-2: #9aa09a;
+  --text-3: #6d746e;
+  --text-inv: #0e100f;
+
+  --accent: #46bfa1;
+  --accent-hover: #5ccfb1;
+  --accent-soft: #14312a;
+  --accent-ring: rgba(70, 191, 161, 0.26);
+
+  --pos: #4bb37b;
+  --neg: #d8695c;
+  --warn: #d0a14a;
+  --info: #6ba3e0;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 6px 22px -10px rgba(0, 0, 0, 0.7);
+  --shadow-pop: 0 12px 40px -12px rgba(0, 0, 0, 0.8);
+}
